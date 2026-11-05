@@ -30,6 +30,7 @@ from typing import Optional
 from uuid import uuid4
 
 from .backends import StorageBackend
+from .tenant_paths import InvalidStoragePath, clamp_ttl, validate_segment
 
 logger = logging.getLogger("xcore.services.storage")
 
@@ -212,12 +213,30 @@ class FileUploader:
         return await self._backend.get_public_url(self._key(file_id, namespace, stored_name))
 
     async def get_signed_url(
-        self, file_id: str, namespace: str, stored_name: Optional[str] = None, expires_in: int = 3600
+        self,
+        file_id: str,
+        namespace: str,
+        stored_name: Optional[str] = None,
+        expires_in: int = 3600,
+        tenant_id: Optional[str] = None,
     ) -> Optional[str]:
-        """Temporary signed URL valid for `expires_in` seconds, or None if unsupported."""
-        return await self._backend.get_signed_url(
-            self._key(file_id, namespace, stored_name), expires_in
-        )
+        """
+        Temporary signed URL (duration capped server-side), or None if unsupported.
+
+        With `tenant_id`, the key must lie under "<tenant_id>/", its segments
+        are validated, and the tenant is part of the signature. Without it
+        (trusted plugins that already authorised access), the historical
+        tenant-less signature is produced.
+        """
+        key = self._key(file_id, namespace, stored_name)
+        if tenant_id:
+            validate_segment(tenant_id, what="tenant")
+            parts = key.split("/")
+            if parts[0] != tenant_id:
+                raise InvalidStoragePath("key outside tenant prefix")
+            for part in parts:
+                validate_segment(part, what="key")
+        return await self._backend.get_signed_url(key, clamp_ttl(expires_in), tenant_id)
 
     async def close(self) -> None:
         await self._backend.close()
