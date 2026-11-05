@@ -55,6 +55,7 @@ from typing import Any, Optional
 from xcore.services.base import BaseService, ServiceStatus
 
 from .backends import build_backend
+from .tenant_paths import InvalidStoragePath, MAX_SIGNED_URL_TTL, tenant_namespace
 from .uploader import FileStorageError, FileTooLargeError, FileTypeNotAllowedError, FileUploader, UploadedFile
 
 __all__ = [
@@ -63,6 +64,9 @@ __all__ = [
     "FileTooLargeError",
     "FileTypeNotAllowedError",
     "UploadedFile",
+    "InvalidStoragePath",
+    "MAX_SIGNED_URL_TTL",
+    "tenant_namespace",
 ]
 
 
@@ -151,6 +155,13 @@ class StorageService(BaseService):
         return await self._require_uploader().get_public_url(file_id, namespace, stored_name)
 
     async def get_signed_url(
-        self, file_id: str, namespace: str, stored_name: Optional[str] = None, expires_in: int = 3600
+        self,
+        file_id: str,
+        namespace: str,
+        stored_name: Optional[str] = None,
+        expires_in: int = 3600,
+        tenant_id: Optional[str] = None,
     ) -> Optional[str]:
-        return await self._require_uploader().get_signed_url(file_id, namespace, stored_name, expires_in)
+        return await self._require_uploader().get_signed_url(
+            file_id, namespace, stored_name, expires_in, tenant_id
+        )

@@ -21,6 +21,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .tenant_paths import clamp_ttl, key_belongs_to_tenant
+
 logger = logging.getLogger("xcore.services.storage")
 
 
@@ -59,7 +61,9 @@ class StorageBackend(ABC):
         """Return a permanent public URL, or None if unsupported/private."""
         return None
 
-    async def get_signed_url(self, key: str, expires_in: int = 3600) -> Optional[str]:
+    async def get_signed_url(
+        self, key: str, expires_in: int = 3600, tenant_id: Optional[str] = None
+    ) -> Optional[str]:
         """Return a temporary signed URL valid for `expires_in` seconds, or None if unsupported."""
         return None
 
@@ -159,8 +163,13 @@ class LocalBackend(StorageBackend):
 
     # ── URLs ──────────────────────────────────────────────────
 
-    def _sign(self, key: str, expires_at: int) -> str:
-        msg = f"{key}:{expires_at}".encode()
+    def _sign(self, key: str, expires_at: int, tenant_id: Optional[str] = None) -> str:
+        # Avec tenant: le tenant fait partie du message signe (separateur \n,
+        # impossible dans une cle valide). Sans tenant: format historique.
+        if tenant_id:
+            msg = f"v2\n{tenant_id}\n{key}\n{expires_at}".encode()
+        else:
+            msg = f"{key}:{expires_at}".encode()
         return hmac.new(self._url_secret.encode(), msg, hashlib.sha256).hexdigest()
 
     async def get_public_url(self, key: str) -> Optional[str]:
@@ -168,16 +177,23 @@ class LocalBackend(StorageBackend):
             return None
         return f"{self._public_base_url}/{key}"
 
-    async def get_signed_url(self, key: str, expires_in: int = 3600) -> Optional[str]:
+    async def get_signed_url(
+        self, key: str, expires_in: int = 3600, tenant_id: Optional[str] = None
+    ) -> Optional[str]:
         if not self._url_secret:
             logger.warning("LocalBackend.get_signed_url: no url_secret configured (storage.local.url_secret)")
             return None
-        expires_at = int(time.time()) + expires_in
-        signature = self._sign(key, expires_at)
+        expires_at = int(time.time()) + clamp_ttl(expires_in)
+        signature = self._sign(key, expires_at, tenant_id)
         base = self._public_base_url or ""
-        return f"{base}/{key}?expires={expires_at}&signature={signature}"
+        url = f"{base}/{key}?expires={expires_at}&signature={signature}"
+        if tenant_id:
+            url += f"&tenant={tenant_id}"
+        return url
 
-    def verify_signed_url(self, key: str, expires_at: int, signature: str) -> bool:
+    def verify_signed_url(
+        self, key: str, expires_at: int, signature: str, tenant_id: Optional[str] = None
+    ) -> bool:
         """
         For use by your app's file-serving route: verify a signature produced
         by get_signed_url(). Returns False if expired or invalid/tampered.
@@ -190,7 +206,9 @@ class LocalBackend(StorageBackend):
             return False
         if int(time.time()) > expires_at:
             return False
-        expected = self._sign(key, expires_at)
+        if tenant_id and not key_belongs_to_tenant(key, tenant_id):
+            return False
+        expected = self._sign(key, expires_at, tenant_id)
         return hmac.compare_digest(expected, signature or "")
 
 
@@ -336,7 +354,12 @@ class S3Backend(StorageBackend):
             return f"https://{self._bucket}.s3.amazonaws.com/{s3_key}"
         return f"https://{self._bucket}.s3.{region}.amazonaws.com/{s3_key}"
 
-    async def get_signed_url(self, key: str, expires_in: int = 3600) -> Optional[str]:
+    async def get_signed_url(
+        self, key: str, expires_in: int = 3600, tenant_id: Optional[str] = None
+    ) -> Optional[str]:
+        if tenant_id and not key_belongs_to_tenant(key, tenant_id):
+            return None
+        expires_in = clamp_ttl(expires_in)
         client = await self._get_client()
         try:
             return await client.generate_presigned_url(
@@ -478,7 +501,12 @@ class SupabaseBackend(StorageBackend):
         storage = await self._get_storage()
         return storage.get_public_url(self._full_path(key))
 
-    async def get_signed_url(self, key: str, expires_in: int = 3600) -> Optional[str]:
+    async def get_signed_url(
+        self, key: str, expires_in: int = 3600, tenant_id: Optional[str] = None
+    ) -> Optional[str]:
+        if tenant_id and not key_belongs_to_tenant(key, tenant_id):
+            return None
+        expires_in = clamp_ttl(expires_in)
         """Return a signed URL valid for `expires_in` seconds."""
         storage = await self._get_storage()
         try:
